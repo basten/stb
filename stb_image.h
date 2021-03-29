@@ -368,6 +368,16 @@ extern "C" {
 #endif
 #endif
 
+// Tiff (EXIF) fields
+#define FocalLength "FocalLength"
+#define FocalPlaneXResolution "FocalPlaneXResolution"
+#define FocalPlaneYResolution "FocalPlaneYResolution"
+#define FocalPlaneResolutionUnit "FocalPlaneResolutionUnit"
+#define FocalLengthIn35mmFilm "FocalLengthIn35mmFilm"
+#define ExifImageWidth "ExifImageWidth"
+#define ExifImageHeight "ExifImageHeight"
+#define ExifOrientation "Orientation"
+
 //////////////////////////////////////////////////////////////////////////////
 //
 // PRIMARY API - works on images of any type
@@ -501,9 +511,19 @@ STBIDEF int   stbi_zlib_decode_buffer(char *obuffer, int olen, const char *ibuff
 STBIDEF char *stbi_zlib_decode_noheader_malloc(const char *buffer, int len, int *outlen);
 STBIDEF int   stbi_zlib_decode_noheader_buffer(char *obuffer, int olen, const char *ibuffer, int ilen);
 
-
 #ifdef __cplusplus
 }
+
+#include <map>
+#include <string>
+
+typedef std::map<std::string, double> stbi__tiff;
+STBIDEF stbi__tiff stbi_load_exif(const char *filename);
+
+#else
+
+typedef void stbi__tiff;
+
 #endif
 
 //
@@ -1933,6 +1953,8 @@ typedef struct
    int scan_n, order[4];
    int restart_interval, todo;
 
+   stbi__tiff *exif;
+
 // kernels
    void (*idct_block_kernel)(stbi_uc *out, int out_stride, short data[64]);
    void (*YCbCr_to_RGB_kernel)(stbi_uc *out, const stbi_uc *y, const stbi_uc *pcb, const stbi_uc *pcr, int count, int step);
@@ -3022,6 +3044,147 @@ static void stbi__jpeg_finish(stbi__jpeg *z)
    }
 }
 
+static stbi_uc get8(stbi_uc *s, stbi__uint32 i)
+{
+    return s[i];
+}
+
+static int get16be(stbi_uc *s, stbi__uint32 i)
+{
+    int z = get8(s, i);
+    return (z << 8) + get8(s, i + 1);
+}
+
+static stbi__uint32 get32be(stbi_uc *s, stbi__uint32 i)
+{
+    stbi__uint32 z = get16be(s, i);
+    return (z << 16) + get16be(s, i + 2);
+}
+
+static int get16le(stbi_uc *s, stbi__uint32 i)
+{
+    int z = get8(s, i);
+    return z + (get8(s, i + 1) << 8);
+}
+
+static stbi__uint32 get32le(stbi_uc *s, stbi__uint32 i)
+{
+    stbi__uint32 z = get16le(s, i);
+    return z + (get16le(s, i + 2) << 16);
+}
+
+static int get16(stbi_uc *s, stbi__uint32 i, bool intel)
+{
+    return intel ? get16le(s, i) : get16be(s, i);
+}
+
+static stbi__uint32 get32(stbi_uc *s, stbi__uint32 i, bool intel)
+{
+    return intel ? get32le(s, i) : get32be(s, i);
+}
+
+static double get_urational(stbi_uc *s, stbi__uint32 i, bool intel)
+{
+    stbi__uint32 numerator = get32(s, i, intel);
+    stbi__uint32 denominator = get32(s, i + 4, intel);
+
+    return numerator / (double)denominator;
+}
+
+static int stbi_process_tiff(stbi__jpeg *z, stbi_uc *tiff, int L)
+{
+    stbi__tiff result;
+
+    // see https://www.media.mit.edu/pia/Research/deepview/exif.html
+
+    if (tiff[0] != tiff[1]) return 0;
+    bool intel = tiff[0] == 'I';
+    if (!intel && tiff[0] != 'M') return 0;
+
+    stbi__uint16 tiff_tag = get16(tiff, 2, intel);
+
+    if (tiff_tag != 0x002A) return 0;
+
+    stbi__uint32 IFD_offset = get32(tiff, 4, intel);
+    stbi__uint32 sub_IFD_offset = 0;
+
+    do
+    {
+        stbi__uint16 num_dir_entries = get16(tiff, IFD_offset, intel);
+        stbi__uint16 dir_size = num_dir_entries * 12;
+
+        for (stbi__uint16 i = 0; i < num_dir_entries; ++i)
+        {
+            stbi__uint32 e = IFD_offset + 2 + i * 12;
+            stbi__uint16 tag = get16(tiff, e, intel);
+            stbi__uint16 format = get16(tiff, e + 2, intel);
+            stbi__uint32 components = get32(tiff, e + 4, intel);
+            stbi__uint32 value32 = get32(tiff, e + 8, intel);
+            stbi__uint16 value16 = get16(tiff, e + 8, intel);
+            stbi_uc value8 = get8(tiff, e + 8);
+
+
+            /* data type formats:
+             * 1 unsigned byte
+             * 2 ascii strings
+             * 3 unsigned short
+             * 4 unsigned long
+             * 5 unsigned rational
+             * 6 signed byte
+             * 7 undefined
+             * 8 signed short
+             * 9 signed long
+             * 10 signed rational
+             * 11 single float
+             * 12 double float
+             */
+
+            switch (tag)
+            {
+            case 0x8769: // offset to Exif SubIFD
+                if (format == 4 && components == 1)
+                    sub_IFD_offset = value32;
+                break;
+            case 0x920a: // FocalLength
+                if (format == 5 && components == 1)
+                    result[FocalLength] = get_urational(tiff, value32, intel);
+                break;
+            case 0xa20e: // FocalPlaneXResolution
+                if (format == 5 && components == 1)
+                    result[FocalPlaneXResolution] = get_urational(tiff, value32, intel);
+                break;
+            case 0xa20f: // FocalPlaneYResolution
+                if (format == 5 && components == 1)
+                    result[FocalPlaneYResolution] = get_urational(tiff, value32, intel);
+                break;
+            case 0xa210: // FocalPlaneResolutionUnit
+                if (format == 3 && components == 1)
+                    result[FocalPlaneResolutionUnit] = value16;
+                break;
+            case 0xa405: // FocalLengthIn35mmFilm
+                if (format == 3 && components == 1)
+                    result[FocalLengthIn35mmFilm] = value16;
+                break;
+            case 0x0112: // Orientation
+                if (format == 3 && components == 1)
+                    result[ExifOrientation] = value16;
+                break;
+            }
+        }
+
+        IFD_offset = get32(tiff, IFD_offset + 2 + dir_size, intel);
+        if (IFD_offset == 0 && sub_IFD_offset != 0)
+        {
+            IFD_offset = sub_IFD_offset;
+            sub_IFD_offset = 0;
+        }
+    } while (IFD_offset > 0);
+
+    *z->exif = result;
+
+    return 1;
+}
+
 static int stbi__process_marker(stbi__jpeg *z, int m)
 {
    int L;
@@ -3114,6 +3277,20 @@ static int stbi__process_marker(stbi__jpeg *z, int m)
             stbi__get16be(z->s); // flags1
             z->app14_color_transform = stbi__get8(z->s); // color transform
             L -= 6;
+         }
+      } else if (m == 0xE1) { // EXIF segment
+         const int header_size = 6;
+         stbi_uc header[header_size];
+         stbi__getn(z->s, header, header_size);
+         L -= header_size;
+
+         if (header[4] == 0 && header[5] == 0 && strcmp((char*)header, "Exif") == 0 && z->exif != 0)
+         {
+            stbi_uc *tiff = (stbi_uc*)stbi__malloc(L);
+            stbi__getn(z->s, tiff, L);
+            stbi_process_tiff(z, tiff, L);
+            STBI_FREE(tiff);
+            L = 0;
          }
       }
 
@@ -3736,6 +3913,8 @@ static void stbi__setup_jpeg(stbi__jpeg *j)
    j->YCbCr_to_RGB_kernel = stbi__YCbCr_to_RGB_simd;
    j->resample_row_hv_2_kernel = stbi__resample_row_hv_2_simd;
 #endif
+
+   j->exif = 0;
 }
 
 // clean up the temporary component buffers
@@ -3961,9 +4140,43 @@ static int stbi__jpeg_info(stbi__context *s, int *x, int *y, int *comp)
    int result;
    stbi__jpeg* j = (stbi__jpeg*) (stbi__malloc(sizeof(stbi__jpeg)));
    j->s = s;
+   stbi__setup_jpeg(j);
    result = stbi__jpeg_info_raw(j, x, y, comp);
    STBI_FREE(j);
    return result;
+}
+
+STBIDEF stbi__tiff stbi_load_exif(char const *filename)
+{
+    stbi__tiff result;
+
+    FILE *f = stbi__fopen(filename, "rb");
+    if (!f)
+    {
+        stbi__errpuc("can't fopen", "Unable to open file");
+        return{};
+    }
+
+    stbi__context s;
+    stbi__start_file(&s, f);
+
+    stbi__jpeg* j = (stbi__jpeg*)stbi__malloc(sizeof(stbi__jpeg));
+    j->s = &s;
+    stbi__setup_jpeg(j);
+    j->exif = new stbi__tiff();
+    if (stbi__decode_jpeg_header(j, STBI__SCAN_header))
+    {
+        result = *j->exif;
+        result[ExifImageWidth] = j->s->img_x;
+        result[ExifImageHeight] = j->s->img_y;
+    }
+
+    delete j->exif;
+    STBI_FREE(j);
+
+    fclose(f);
+
+    return result;
 }
 #endif
 
