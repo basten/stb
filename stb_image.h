@@ -519,6 +519,7 @@ STBIDEF int   stbi_zlib_decode_noheader_buffer(char *obuffer, int olen, const ch
 
 typedef std::map<std::string, double> stbi__tiff;
 STBIDEF stbi__tiff stbi_load_exif(const char *filename);
+STBIDEF stbi__tiff stbi_load_exif_from_memory(const unsigned char *buffer, int length);
 
 #else
 
@@ -1321,7 +1322,6 @@ static FILE *stbi__fopen(char const *filename, char const *mode)
 #endif
    return f;
 }
-
 
 STBIDEF stbi_uc *stbi_load(char const *filename, int *x, int *y, int *comp, int req_comp)
 {
@@ -4146,19 +4146,14 @@ static int stbi__jpeg_info(stbi__context *s, int *x, int *y, int *comp)
    return result;
 }
 
-STBIDEF stbi__tiff stbi_load_exif(char const *filename)
+STBIDEF stbi__tiff stbi_load_exif(stbi__context &s)
 {
     stbi__tiff result;
 
-    FILE *f = stbi__fopen(filename, "rb");
-    if (!f)
+    if (!stbi__jpeg_test(&s))
     {
-        stbi__errpuc("can't fopen", "Unable to open file");
-        return{};
+        return result;
     }
-
-    stbi__context s;
-    stbi__start_file(&s, f);
 
     stbi__jpeg* j = (stbi__jpeg*)stbi__malloc(sizeof(stbi__jpeg));
     j->s = &s;
@@ -4174,10 +4169,36 @@ STBIDEF stbi__tiff stbi_load_exif(char const *filename)
     delete j->exif;
     STBI_FREE(j);
 
+    return result;
+}
+
+STBIDEF stbi__tiff stbi_load_exif(char const *filename)
+{
+    FILE *f = stbi__fopen(filename, "rb");
+    if (!f)
+    {
+        stbi__errpuc("can't fopen", "Unable to open file");
+        return{};
+    }
+
+    stbi__context s;
+    stbi__start_file(&s, f);
+
+    auto result = stbi_load_exif(s);
+
     fclose(f);
 
     return result;
 }
+
+STBIDEF stbi__tiff stbi_load_exif_from_memory(const unsigned char *buffer, int length)
+{
+    stbi__context s;
+    stbi__start_mem(&s, buffer, length);
+
+    return stbi_load_exif(s);
+}
+
 #endif
 
 // public domain zlib decode    v0.2  Sean Barrett 2006-11-18
